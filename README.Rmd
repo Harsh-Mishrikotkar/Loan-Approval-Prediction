@@ -1,0 +1,237 @@
+---
+title: "Loan Approval Prediction"
+author: "Harsh Mishrikotkar"
+date: "2025-05-20"
+output: rmarkdown::github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, error = FALSE)
+```
+
+### Importing libraries and data
+
+```{r import libraries and data}
+
+# Installing Libraries
+library(tidyverse)
+library(gridExtra)
+library(grid)
+library(corrplot)
+library(caTools) 
+library(class)
+library(caret)
+
+# Installing Data set
+loanData <- read_csv("loan_approval_dataset.csv")
+
+```
+###Variables
+
+* **no_of_dependents:** How many dependents rely on the loan applicant
+* **Education:** Weather the loan applicant has or has not graduated
+* **self_employed:** Weather the loan applicant is or is not self employed
+* **Income_annum:** Annual income of the applicant
+* **loan_amount:** Amount of loan application
+* **loan_term:** Loan term in years
+* **cibil_score:** Credit score
+* **residential_assets_value:** Value of residential assets
+* **commercial_assets_value:** Value of commercial assets
+* **luxury_assets_value:** Value of luxury assets
+* **bank_asset_value:** Value of bank assets
+* **loan_status:** Weather the loan was approved or rejected
+
+### Data Cleaning
+
+```{r Data Cleaning}
+
+loanData <- loanData|>
+  select(-loan_id)
+
+summary(loanData)
+colSums(is.na(loanData))
+
+```
+
+### Graphs of Variables
+
+```{r Graph of variables, fig.width = 10, fig.height = 30}
+
+graphMaker <- function(data) {
+  
+  numeric_cols <- names(data)[sapply(data, is.numeric)]
+  categorical_cols <- names(data)[sapply(data, function(x) is.factor(x) | is.character(x))]
+  
+  categorical_cols <- categorical_cols[categorical_cols != "loan_status"]
+  
+  if ("loan_status" %in% names(data)) {
+    data$loan_status <- as.factor(data$loan_status)
+  } else {
+    data$loan_status <- factor("None")
+    }
+  
+  loan_colors <- c("Approved" = "green", "Rejected" = "red")
+  
+  plot_list <- list()
+  plot_count <- 1
+  
+  for (col in numeric_cols) {
+    p <- ggplot(data,
+                aes_string(x = col,
+                           fill = "loan_status")) +
+      geom_histogram(position = "identity",
+                     alpha = 0.6,
+                     bins = 30,
+                     colour = "black") +
+      scale_fill_manual(values = loan_colors) +
+      labs(title = paste("Histogram of", col),
+           x = col,
+           y = "Count") +
+      theme_minimal() +
+      theme(legend.title = element_blank())
+    
+    plot_list[[plot_count]] <- p
+    plot_count <- plot_count + 1
+  }
+  
+  for (col in categorical_cols) {
+    
+    p <- ggplot(data,
+                aes_string(x = col, fill = "loan_status")) +
+      geom_bar(position = "dodge",
+               colour = "black") +
+      scale_fill_manual(values = loan_colors) +
+      labs(title = paste("Bar Chart of", col),
+           x = col,
+           y = "Count") +
+      theme_minimal() +
+      theme(legend.title = element_blank(),
+            axis.text.x = element_text(angle = 45, hjust = 1))
+    
+    plot_list[[plot_count]] <- p
+    plot_count <- plot_count + 1
+  }
+  
+  n_rows <- ceiling(length(plot_list) / 2)
+  
+  if (length(plot_list) > 0) {
+    grid.arrange(grobs = plot_list, ncol = 2)
+  } else {
+    cat("No plots were created. Check your data.")
+    }
+}
+
+graphMaker(loanData)
+
+
+```
+
+With the histograms and bar charts above: Rejected loan applications occurred almost guaranteed when the credit score was below approximately 500. Otherwise all the variables have a similar spread between Rejected and Approved
+
+
+```{r Coorelation Plot, fig.width = 15, fig.height = 15}
+
+cols = c(4, 5, 7:11)
+pairedData <- loanData
+pairs(pairedData[, cols], panel=function(x,y){
+  colors <- ifelse(loanData$loan_status == "Approved", "green",
+                   ifelse(loanData$loan_status == "Rejected", "red", "blue"))
+  points(x, y, col = colors)
+})
+
+```
+
+Given the pair plots, we have limits on all variables, with none, other than the Credit Score having any distinction for any patterns.
+
+```{r KNN model}
+
+set.seed(1763)
+
+loanApprovalModel <- function(data, test_size = 0.3, k = NULL) {
+  
+  data$education <- as.factor(data$education)
+  data$self_employed <- as.factor(data$self_employed)
+  data$loan_status <- as.factor(data$loan_status)
+  
+  numeric_cols <- c("no_of_dependents",
+                    "income_annum",
+                    "loan_amount",
+                    "loan_term",
+                    "cibil_score",
+                    "residential_assets_value",
+                    "commercial_assets_value",
+                    "luxury_assets_value",
+                    "bank_asset_value")
+  data_processed <- data
+  
+  data_processed[numeric_cols] <- lapply(data_processed[numeric_cols], function(x) {
+    (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+  })
+  
+  data_processed$education_graduate <- ifelse(data_processed$education == "Graduate", 1, 0)
+  data_processed$self_employed_yes <- ifelse(data_processed$self_employed == "Yes", 1, 0)
+  
+  data_processed$education <- NULL
+  data_processed$self_employed <- NULL
+  
+  sample_index <- createDataPartition(data_processed$loan_status, p = 1-test_size, list = FALSE)
+  train_data <- data_processed[sample_index, ]
+  test_data <- data_processed[-sample_index, ]
+  
+  train_features <- train_data[, !(names(train_data) %in% c("loan_status"))]
+  train_target <- train_data$loan_status
+  
+  test_features <- test_data[, !(names(test_data) %in% c("loan_status"))]
+  test_target <- test_data$loan_status
+  
+  if(is.null(k)) {
+    k_values <- seq(1, min(29, nrow(train_data)-1), by = 2)
+    accuracy_values <- numeric(length(k_values))
+    
+    for(i in seq_along(k_values)) {
+      knn_pred <- knn(train = train_features,
+                      test = test_features,
+                      cl = train_target,
+                      k = k_values[i])
+      
+      accuracy_values[i] <- mean(knn_pred == test_target)
+    }
+    
+    k <- k_values[which.max(accuracy_values)]
+  }
+  
+  final_pred <- knn(train = train_features,
+                    test = test_features,
+                    cl = train_target,
+                    k = k,
+                    prob = TRUE)
+  
+  conf_matrix <- table(Predicted = final_pred, Actual = test_target)
+  accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+  
+  return(list(train_features = train_features,
+              train_target = train_target,
+              test_features = test_features,
+              test_target = test_target,
+              optimal_k = k,
+              predictions = final_pred,
+              confusion_matrix = conf_matrix,
+              accuracy = accuracy,
+              model = function(new_data) {
+                return(predict_loan_status(new_data, train_features, train_target, k))
+              }))
+}
+
+model_results <- loanApprovalModel(loanData)
+
+print(model_results$confusion_matrix)
+
+print(paste("Accuracy:", model_results$accuracy))
+
+print(paste("Optimal k:", model_results$optimal_k))
+
+```
+
+The KNN model scaled to the normal values has an accuracy of `r round(model_results$accuracy, 4)` or `r round(model_results$accuracy, 4)*100`%.
+
+This model is accurate as it has an accuracy above `r round(model_results$accuracy, 4)*100`%. This is enough to belive the model to be accurate.
